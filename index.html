@@ -57,6 +57,15 @@ h1{font-size:18px;margin:0 0 6px}p{font-size:13px;margin:5px 0 12px;line-height:
     <div class="slider-row" style="grid-template-columns:55px 1fr 70px"><label for="dip">Fall</label><input id="dip" type="range" min="0" max="90" step="1" value="45"><output id="dipVal">45°</output></div>
     <div class="slider-row" style="grid-template-columns:55px 1fr 70px"><label for="planeWidth">Breidd</label><input id="planeWidth" type="range" min="1" max="50" step="0.5" value="10"><output id="planeWidthVal">10 m</output></div>
     <button id="flipDip" disabled>Snu fallretning</button>
+    <fieldset id="planeTransform" disabled style="margin-top:10px;border:1px solid #ccd8d2;border-radius:6px">
+      <legend>Flytt og roter valt plan</legend>
+      <p class="small">Flytting i meter frå opphavleg midtpunkt. Positive verdiar er aust, nord og opp. Rotering skjer rundt midtpunktet.</p>
+      <div class="slider-row" style="grid-template-columns:55px 1fr"><label for="planeEast">Aust</label><input id="planeEast" type="number" step="0.5" value="0"></div>
+      <div class="slider-row" style="grid-template-columns:55px 1fr"><label for="planeNorth">Nord</label><input id="planeNorth" type="number" step="0.5" value="0"></div>
+      <div class="slider-row" style="grid-template-columns:55px 1fr"><label for="planeUp">Opp</label><input id="planeUp" type="number" step="0.5" value="0"></div>
+      <div class="slider-row" style="grid-template-columns:55px 1fr 70px"><label for="planeStrike">Strøk</label><input id="planeStrike" type="range" min="0" max="360" step="0.1" value="0"><output id="planeStrikeVal">0°</output></div>
+      <div class="buttons"><button id="resetPlanePosition">Nullstill flytting</button><button id="deletePlane" style="color:#a41b24">Slett valt plan</button></div>
+    </fieldset>
     <p id="planeInfo" class="small">Breidd er målt langs planet, sentrert om strøklinja. Sliderane justerer valt plan, eller neste nye plan.</p>
   </details>
   <p style="margin:12px 0 4px"><strong>Forskyv kuler i 3D</strong> (berre vising)</p>
@@ -93,7 +102,7 @@ function updateVisuals(){
 
 const status = (txt) => $('status').textContent = txt;
 const error = (e) => { console.error(e); $('error').textContent = 'Feil: ' + (e?.message || String(e)); };
-const enable = () => { $('plane').disabled = !view || sceneBusy; $('flipDip').disabled = !view || sceneBusy; $('bolt').disabled = !view || sceneBusy; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = (!placed.length && !planeStart) || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
+const enable = () => { $('planeTransform').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value); $('plane').disabled = !view || sceneBusy; $('flipDip').disabled = !view || sceneBusy; $('bolt').disabled = !view || sceneBusy; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = (!placed.length && !planeStart) || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
 const changeMode = (m) => { planeStart=null;if(planeMarker)annotations?.remove(planeMarker);planeMarker=null; mode = m; for(const id of ['bolt','plane','navigate'])$(id).classList.toggle('active',m===id); if(view) view.container.style.cursor = m!=='navigate' ? 'crosshair':'default'; enable(); status(m==='plane' ? 'Klikk første punkt langs strøket. Esc avbryt.' : m==='bolt' ? 'Klikk på bergflata for å plassere ein bolt.' : 'Naviger i modellen. Vel bolt eller plan for annotering.'); };
 $('plane').onclick = () => changeMode('plane');
 window.addEventListener('keydown',evt=>{if(evt.key==='Escape')changeMode('navigate');});
@@ -124,6 +133,11 @@ require([
   function readPlane(){
     const g=selectedPlane();
     if(g){$('dip').value=g.attributes.dip;$('planeWidth').value=g.attributes.width;fallSide=g.attributes.side;}
+    const offsets=g?.attributes.offsets||[0,0,0];
+    ['planeEast','planeNorth','planeUp'].forEach((id,i)=>$(id).value=offsets[i]);
+    $('planeStrike').value=g?.attributes.strike||0;
+    $('planeStrikeVal').textContent=Number($('planeStrike').value).toFixed(1)+'°';
+    enable();
     $('dipVal').textContent=$('dip').value+'°';$('planeWidthVal').textContent=$('planeWidth').value+' m';
     if(g){const a=g.attributes;const bearing=(a.strike+90*a.side+360)%360;$('planeInfo').textContent=`Strøk: ${a.strike.toFixed(1)}° / ${((a.strike+180)%360).toFixed(1)}°. Fall: ${a.dip}° mot ${bearing.toFixed(1)}°. Lengd langs strøk: ${a.length.toFixed(2)} m. ${a.localSpace?'Retningar relativt til nord.':'Retningar relativt til rutenett-nord.'}`;}
     else $('planeInfo').textContent='Sliderane gjeld neste nye plan. Breidd er målt langs planet, sentrert om strøklinja.';
@@ -143,6 +157,44 @@ require([
   }
   for(const id of ['dip','planeWidth'])$(id).oninput=editPlane;
   $('flipDip').onclick=()=>{fallSide*=-1;editPlane();};
+  function translatedOrigin(base,offsets,sr){
+    const [east,north,up]=offsets;
+    if(sr.isWebMercator){
+      const radius=6378137;
+      const lat=2*Math.atan(Math.exp(base[1]/radius))-Math.PI/2;
+      const newLat=lat+north/radius;
+      if(Math.abs(newLat)>=85*Math.PI/180)throw new Error('Flyttinga er utanfor støtta breiddegrad.');
+      return [base[0]+east/Math.cos(lat),radius*Math.log(Math.tan(Math.PI/4+newLat/2)),base[2]+up];
+    }
+    if(sr.isWGS84){
+      const degreesPerMetre=180/(Math.PI*6378137);
+      const lat=base[1]*Math.PI/180;
+      if(Math.abs(base[1]+north*degreesPerMetre)>=85)throw new Error('Flyttinga er utanfor støtta breiddegrad.');
+      return [base[0]+east*degreesPerMetre/Math.cos(lat),base[1]+north*degreesPerMetre,base[2]+up];
+    }
+    return [base[0]+east,base[1]+north,base[2]+up];
+  }
+  function transformPlane(){
+    const g=selectedPlane();if(!g || sceneBusy)return;
+    const inputs=['planeEast','planeNorth','planeUp','planeStrike'];
+    if(inputs.some(id=>!$(id).validity.valid || $(id).value===''))return;
+    const offsets=inputs.slice(0,3).map(id=>Number($(id).value));
+    try{
+      const baseOrigin=g.attributes.baseOrigin||g.attributes.origin.slice();
+      const a={...g.attributes,baseOrigin,offsets,strike:Number($('planeStrike').value)%360,origin:translatedOrigin(baseOrigin,offsets,g.geometry.spatialReference)};
+      const geometry=planeGeometry(a,g.geometry.spatialReference);
+      g.attributes=a;g.geometry=geometry;visuals[placed.indexOf(g)].geometry=geometry.clone();
+      $('error').textContent='';readPlane();
+    }catch(e){error(e);}
+  }
+  for(const id of ['planeEast','planeNorth','planeUp','planeStrike'])$(id).oninput=transformPlane;
+  $('resetPlanePosition').onclick=()=>{for(const id of ['planeEast','planeNorth','planeUp'])$(id).value=0;transformPlane();};
+  $('deletePlane').onclick=()=>{
+    const g=selectedPlane();if(!g || sceneBusy)return;
+    const index=placed.indexOf(g);annotations.remove(visuals[index]);
+    placed.splice(index,1);visuals.splice(index,1);refreshPlanes();enable();
+    status('Valt plan er sletta.');
+  };
   function addPlane(p){
     if(!planeStart){planeStart=p.clone();planeMarker=new Graphic({geometry:p.clone(),symbol:sphereSymbol(0.4)});annotations.add(planeMarker);enable();status('Klikk andre punkt langs strøket. Esc avbryt.');return;}
     const first=planeStart,sr=p.spatialReference;
