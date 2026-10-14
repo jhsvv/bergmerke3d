@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="nn">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bergmerke 3D – test med sikra Web Scene</title>
+<link rel="stylesheet" href="https://js.arcgis.com/4.34/esri/themes/light/main.css" />
+<style>
+html,body{margin:0;height:100%;font-family:system-ui,Segoe UI,Arial,sans-serif;color:#17352d}
+#viewDiv{position:absolute;inset:0}
+#panel{position:absolute;z-index:10;left:12px;top:12px;width:min(340px,calc(100vw - 48px));background:rgba(255,255,255,.94);box-shadow:0 5px 25px #0003;border-radius:12px;padding:16px}
+h1{font-size:18px;margin:0 0 6px}p{font-size:13px;margin:5px 0 12px;line-height:1.45}button{cursor:pointer;border:1px solid #97aca5;border-radius:8px;padding:9px 11px;background:#fff;font-weight:600;color:#17352d}button.active{background:#c92e31;color:white;border-color:#c92e31}button:disabled{opacity:.45;cursor:default}.slider-row{display:grid;grid-template-columns:24px 1fr 70px;align-items:center;gap:8px;margin:6px 0}.slider-row output{text-align:right;font-variant-numeric:tabular-nums}.slider-row input{width:100%;min-width:0}.buttons{display:flex;flex-wrap:wrap;gap:6px}.small{font-size:12px;white-space:pre-wrap;line-height:1.45}#status{margin:12px 0 0;background:#edf2ef;padding:8px;border-radius:6px}#error{margin-top:8px;color:#a41b24;word-break:break-word}#more{margin-top:10px;font-size:12px;color:#52665e}
+</style>
+<style>
+#panel{max-height:calc(100vh - 56px);overflow-y:auto}
+#scenePicker{border-bottom:1px solid #ccd8d2;margin-bottom:12px;padding-bottom:8px}
+#scenePicker label{display:block;font-size:13px;margin:8px 0 4px}
+#scenePicker select{width:100%;margin-bottom:8px}
+#scenePicker select,#searchText{box-sizing:border-box;border:1px solid #97aca5;border-radius:6px;padding:8px;font:inherit;font-size:13px;color:#17352d;background:white}
+#searchText{flex:1;min-width:0;width:120px}
+</style>
+<script src="https://js.arcgis.com/4.34/"></script>
+</head>
+<body>
+<div id="viewDiv"></div>
+<aside id="panel">
+  <h1>Bergmerke 3D · kuler og XYZ</h1>
+  <p>Logg inn, vel gruppe og opne ei Web Scene frå ArcGIS Online.</p>
+  <section id="scenePicker" hidden>
+    <p id="account" class="small"></p>
+    <label for="groupSelect">Gruppe</label>
+    <select id="groupSelect"><option value="">Alle tilgjengelege scener</option></select>
+    <form id="sceneSearch">
+      <label for="searchText">Søk etter scene</label>
+      <div class="buttons"><input id="searchText" type="search" placeholder="Namn på scene"><button type="submit">Søk</button></div>
+    </form>
+    <label for="sceneSelect">Scene</label>
+    <select id="sceneSelect" disabled><option>Hentar scener …</option></select>
+    <div class="buttons"><button id="openScene" disabled>Opne scene</button><button id="moreScenes" hidden>Hent fleire</button></div>
+    <p id="sceneCount" class="small" aria-live="polite"></p>
+    <p id="currentScene" class="small">Ingen scene er opna.</p>
+  </section>
+  <div class="buttons">
+    <button id="login">Logg inn med SSO</button>
+    <button id="bolt" disabled>● Plasser bolt</button>
+    <button id="navigate" class="active" disabled>Hand / naviger</button>
+    <button id="undo" disabled>Angre siste</button>
+    <button id="save" disabled>Lagre JSON</button>
+    <button id="zoomBolts" disabled>Zoom til boltar</button>
+  </div>
+  <p style="margin:12px 0 4px"><strong>Forskyv kuler i 3D</strong> (berre vising)</p>
+  <div class="slider-row"><label for="dx">X</label><input id="dx" type="range" min="-30" max="30" step="0.5" value="0"><output id="dxVal">0 m</output></div>
+  <div class="slider-row"><label for="dy">Y</label><input id="dy" type="range" min="-30" max="30" step="0.5" value="0"><output id="dyVal">0 m</output></div>
+  <div class="slider-row"><label for="dz">Z</label><input id="dz" type="range" min="-30" max="30" step="0.5" value="3"><output id="dzVal">3 m</output></div>
+  <div class="slider-row"><label for="diameter">Ø</label><input id="diameter" type="range" min="0.5" max="10" step="0.5" value="3"><output id="diameterVal">3 m</output></div>
+  <button id="resetOffsets" type="button">Nullstill forskyving</button>
+  <p class="small">X/Y er forskyving i kartkoordinatane (Web Mercator), Z er høgde. Ein kule har fysisk diameter i meter, ikkje skjermpikslar.</p>
+  <div id="status" class="small">Lastar ArcGIS JavaScript SDK …</div>
+  <div id="error" class="small"></div>
+  <div id="more">Boltar blir haldne separat for kvar scene medan sida er open. Last ned JSON for kvar scene før du lukkar eller lastar sida på nytt. Denne testen endrar ikkje Web Scene eller Enterprise-data.</div>
+</aside>
+<script>
+(() => {
+'use strict';
+const ITEM_ID = 'fa7914fe23134a09a3c44483de2da30a';
+const PORTAL_URL = 'https://kart-vegvesen.maps.arcgis.com';
+const CLIENT_ID = '6jgJ7gpJHyIv5miA';
+const $ = (id) => document.getElementById(id);
+let mode = 'navigate', placed = [], visuals = [], view, annotations, currentSceneId = null, sceneBusy = false;
+const sceneDrafts = new Map();
+window.addEventListener('beforeunload',evt=>{
+  if(placed.length || [...sceneDrafts.values()].some(draft=>draft.length)){evt.preventDefault();evt.returnValue='';}
+});
+const values=()=>({dx:Number($('dx').value),dy:Number($('dy').value),dz:Number($('dz').value),diameter:Number($('diameter').value)});
+const sphereSymbol=(diameter)=>({type:'point-3d',symbolLayers:[{type:'object',resource:{primitive:'sphere'},width:diameter,height:diameter,depth:diameter,material:{color:'#e00000'}}]});
+function updateVisuals(){
+  const {dx,dy,dz,diameter}=values();
+  for(const id of ['dx','dy','dz','diameter']) $(id+'Val').textContent=$(id).value+' m';
+  visuals.forEach((visual,i)=>{const base=placed[i]?.geometry;if(!base)return;const point=base.clone();point.x=base.x+dx;point.y=base.y+dy;point.z=base.z+dz;visual.geometry=point;visual.symbol=sphereSymbol(diameter);});
+}
+
+const status = (txt) => $('status').textContent = txt;
+const error = (e) => { console.error(e); $('error').textContent = 'Feil: ' + (e?.message || String(e)); };
+const enable = () => { $('bolt').disabled = !view || sceneBusy; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = !placed.length || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
+const changeMode = (m) => { mode = m; $('bolt').classList.toggle('active',m==='bolt'); $('navigate').classList.toggle('active',m==='navigate'); if(view) view.container.style.cursor = m==='bolt' ? 'crosshair':'default'; status(m==='bolt' ? 'Klikk på bergflata for å plassere ein bolt.' : 'Naviger i modellen. Vel «Plasser bolt» for annotering.'); };
+$('bolt').onclick = () => changeMode('bolt');
+$('navigate').onclick = () => changeMode('navigate');
+$('undo').onclick = () => { placed.pop();const visual=visuals.pop();if(visual) annotations.remove(visual);enable();status(`${placed.length} bolt(ar) står att.`); };
+for(const id of ['dx','dy','dz','diameter']) $(id).addEventListener('input',updateVisuals);
+$('resetOffsets').onclick=()=>{for(const id of ['dx','dy','dz']) $(id).value=0;updateVisuals();};
+$('zoomBolts').onclick = async () => { if(!view || !placed.length)return; try { await view.goTo({target:visuals.map(g=>g.geometry),scale:600}, {duration:900}); } catch(e) {error(e);} };
+$('save').onclick = () => {
+  const result = {format:'Bergmerke3D',version:1,websceneId:currentSceneId,portal:PORTAL_URL,exportedAt:new Date().toISOString(),graphics:placed.map(g=>g.toJSON())};
+  const url = URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));
+  const a=document.createElement('a'); a.href=url;a.download='bergmerke-3d-boltar.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);
+};
+require([
+  'esri/WebScene', 'esri/views/SceneView', 'esri/layers/GraphicsLayer', 'esri/Graphic', 'esri/portal/Portal', 'esri/portal/PortalItem', 'esri/identity/IdentityManager', 'esri/identity/OAuthInfo'
+], function(WebScene,SceneView,GraphicsLayer,Graphic,Portal,PortalItem,esriId,OAuthInfo) {
+  esriId.registerOAuthInfos([new OAuthInfo({appId:CLIENT_ID,portalUrl:PORTAL_URL,flowType:'auto',popup:false})]);
+  const sharingUrl = PORTAL_URL + "/sharing";
+  $('login').onclick = () => {
+    status("Opnar SSO-pålogging …");
+    esriId.getCredential(sharingUrl).then(startScene).catch(error);
+  };
+  let started = false;
+  async function startScene(){
+    if(started)return;started=true;
+    try {
+      portal.authMode = 'immediate';
+      await portal.load();
+      $('account').textContent = `Innlogga som ${portal.user.username}`;
+      $('login').hidden=true;
+      $('scenePicker').hidden=false;
+      const groups = await portal.user.fetchGroups();
+      groups.sort((a,b)=>a.title.localeCompare(b.title,'nn')).forEach(group=>{
+        $('groupSelect').add(new Option(group.title,group.id));
+      });
+      await searchScenes();
+    } catch(e) { started=false; $('login').hidden=false; error(e); status('Kunne ikkje hente sceneveljaren. Prøv innlogging på nytt.'); }
+  }
+  const portal = new Portal({url:PORTAL_URL});
+  let searchVersion = 0, nextQuery = null;
+  function pickerState(){
+    $('openScene').disabled = sceneBusy || !$('sceneSelect').value;
+  }
+  async function searchScenes(append=false){
+    const version = ++searchVersion;
+    const group = $('groupSelect').value;
+    // Keep user text inside a quoted portal search term.
+    const term = $('searchText').value.trim().replace(/[\\"]/g,' ');
+    const params = append ? nextQuery : {query:`type:"Web Scene"${group ? ` AND group:${group}` : ''}${term ? ` AND title:"${term}"` : ''}`,num:100,start:1,sortField:'title',sortOrder:'asc'};
+    if(!params)return;
+    nextQuery=null;
+    $('moreScenes').hidden=true;
+    if(!append){ $('sceneSelect').replaceChildren(); $('sceneSelect').disabled=true; pickerState(); }
+    $('sceneCount').textContent='Hentar scener …';
+    $('error').textContent='';
+    try {
+      const result = await portal.queryItems(params);
+      if(version!==searchVersion)return;
+      result.results.forEach(item=>$('sceneSelect').add(new Option(`${item.title} (${item.owner})`,item.id)));
+      if(!append && [...$('sceneSelect').options].some(option=>option.value===ITEM_ID)) $('sceneSelect').value=ITEM_ID;
+      nextQuery=result.nextQueryParams?.start > 0 ? result.nextQueryParams : null;
+      $('moreScenes').hidden=!nextQuery;
+      $('sceneSelect').disabled=!$('sceneSelect').options.length;
+      $('sceneCount').textContent=$('sceneSelect').options.length ? `${$('sceneSelect').options.length} av ${result.total} scener viste.` : 'Ingen scener funne. Prøv ei anna gruppe eller eit anna søk.';
+      pickerState();
+      status('Vel ei scene og trykk «Opne scene».');
+    } catch(e){ if(version!==searchVersion)return; error(e); $('sceneCount').textContent='Kunne ikkje hente scener. Prøv søket på nytt.'; pickerState(); }
+  }
+  $('sceneSearch').onsubmit=evt=>{evt.preventDefault();searchScenes();};
+  $('groupSelect').onchange=()=>searchScenes();
+  $('sceneSelect').onchange=pickerState;
+  $('moreScenes').onclick=()=>searchScenes(true);
+  $('openScene').onclick=()=>loadScene($('sceneSelect').value);
+  async function loadScene(id) {
+    if(!id || sceneBusy)return;
+    if(id===currentSceneId && view){status('Denne scena er allereie opna.');return;}
+    sceneBusy=true;enable();pickerState();
+    const scene = new WebScene({portalItem:new PortalItem({id,portal})});
+    try {
+      $('error').textContent='';
+      status('Hentar sikra Web Scene …');
+      await scene.load();
+      if(currentSceneId)sceneDrafts.set(currentSceneId,placed);
+      if(view){view.destroy();view=null;}
+      currentSceneId=id;
+      placed=sceneDrafts.get(id)||[];
+      visuals=placed.map(g=>g.clone());
+      annotations = new GraphicsLayer({title:'Bergmerke – mellombelse boltar',elevationInfo:{mode:'absolute-height'},graphics:visuals});
+      scene.add(annotations);
+      view = new SceneView({container:'viewDiv',map:scene,popupEnabled:false,qualityProfile:'high'});
+      await view.when();
+      updateVisuals();changeMode('navigate');
+      $('currentScene').textContent=`Open scene: ${scene.portalItem.title}. ${placed.length} mellombelse boltar.`;
+      const meshLayers = scene.allLayers.filter(layer => layer.type === 'integrated-mesh' || layer.type === 'integrated-mesh-3dtiles');
+      status(`Web Scene opna. ${meshLayers.length} Integrated Mesh-lag funne. Vel «Plasser bolt».`);
+      view.on('click', (evt) => {
+        if(mode !== 'bolt') return;
+        evt.stopPropagation();
+        try {
+          // toMap brukar den synlege mesh-overflata og deretter bakken når ingen mesh blir treft.
+          const p = view.toMap({x:evt.x,y:evt.y});
+          if(!p || !Number.isFinite(p.z)) {status('Ingen 3D-treff. Prøv å klikke direkte på modellen.');return;}
+          const g = new Graphic({
+            geometry:p.clone(),
+            symbol:sphereSymbol(values().diameter),
+            attributes:{category:'bolt',index:placed.length+1,createdAt:new Date().toISOString()}
+          });
+          placed.push(g);const visual=g.clone();visuals.push(visual);annotations.add(visual);updateVisuals();enable();
+          status(`Bolt ${placed.length} plassert. X: ${p.x.toFixed(2)}, Y: ${p.y.toFixed(2)}, Z: ${p.z.toFixed(2)} (SR: ${p.spatialReference?.wkid ?? 'ukjent'}). Visingsforskyving: X=${values().dx}, Y=${values().dy}, Z=${values().dz} m. Juster X/Y/Z om kula er skjult av bergflata.`);
+        } catch(e) {error(e);}
+      });
+    } catch(e) {
+      if(view?.map===scene){view.destroy();view=null;currentSceneId=null;sceneDrafts.set(id,placed);$('currentScene').textContent='Scena kunne ikkje opnast. Vel scene og prøv på nytt.';}
+      error(e);status('Kunne ikkje opne scena. Kontroller tilgang til scena og laga ho inneheld.');
+    } finally {sceneBusy=false;enable();pickerState();}
+  }
+  status('Kontrollerer SSO-innlogging …');
+  esriId.checkSignInStatus(sharingUrl).then(startScene).catch(() => {
+    status('Ikkje innlogga. Trykk «Logg inn med SSO».');
+  });
+});
+})();
+</script>
+</body>
+</html>
