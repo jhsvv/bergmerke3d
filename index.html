@@ -24,7 +24,7 @@ h1{font-size:18px;margin:0 0 6px}p{font-size:13px;margin:5px 0 12px;line-height:
 <body>
 <div id="viewDiv"></div>
 <aside id="panel">
-  <h1>Bergmerke 3D · kuler og XYZ</h1>
+  <h1>Bergmerke 3D · boltar og plan</h1>
   <p>Logg inn, vel gruppe og opne ei Web Scene frå ArcGIS Online.</p>
   <section id="scenePicker" hidden>
     <p id="account" class="small"></p>
@@ -68,13 +68,21 @@ h1{font-size:18px;margin:0 0 6px}p{font-size:13px;margin:5px 0 12px;line-height:
     </fieldset>
     <p id="planeInfo" class="small">Breidd er målt langs planet, sentrert om strøklinja. Sliderane justerer valt plan, eller neste nye plan.</p>
   </details>
-  <p style="margin:12px 0 4px"><strong>Forskyv kuler i 3D</strong> (berre vising)</p>
-  <div class="slider-row"><label for="dx">X</label><input id="dx" type="range" min="-30" max="30" step="0.5" value="0"><output id="dxVal">0 m</output></div>
-  <div class="slider-row"><label for="dy">Y</label><input id="dy" type="range" min="-30" max="30" step="0.5" value="0"><output id="dyVal">0 m</output></div>
-  <div class="slider-row"><label for="dz">Z</label><input id="dz" type="range" min="-30" max="30" step="0.5" value="3"><output id="dzVal">3 m</output></div>
-  <div class="slider-row"><label for="diameter">Ø</label><input id="diameter" type="range" min="0.5" max="10" step="0.5" value="3"><output id="diameterVal">3 m</output></div>
-  <button id="resetOffsets" type="button">Nullstill forskyving</button>
-  <p class="small">X/Y er forskyving i kartkoordinatane (Web Mercator), Z er høgde. Ein kule har fysisk diameter i meter, ikkje skjermpikslar.</p>
+  <details open>
+    <summary style="margin-top:12px">Boltar · retning og lengde</summary>
+    <p class="small">Klikk bergflata med «Plasser bolt». Innfestinga står fast. Retning: 0° nord, 90° aust (rutenett-nord i UTM). Helling: minus ned, pluss opp.</p>
+    <label for="boltSelect">Bolt som skal justerast</label>
+    <select id="boltSelect" style="width:100%"><option value="">Ny bolt (standardverdiar)</option></select>
+    <fieldset id="boltSettings" disabled style="border:0;padding:0;margin:0">
+      <div class="slider-row" style="grid-template-columns:65px 1fr 65px"><label for="boltAzimuth">Retning</label><input id="boltAzimuth" type="range" min="0" max="360" step="1" value="0"><output id="boltAzimuthVal">0°</output></div>
+      <div class="slider-row" style="grid-template-columns:65px 1fr 65px"><label for="boltInclination">Helling</label><input id="boltInclination" type="range" min="-90" max="90" step="1" value="-10"><output id="boltInclinationVal">−10°</output></div>
+      <div class="slider-row" style="grid-template-columns:65px 1fr 65px"><label for="boltLength">Lengde</label><input id="boltLength" type="range" min="0.1" max="20" step="0.1" value="3"><output id="boltLengthVal">3 m</output></div>
+      <div class="slider-row" style="grid-template-columns:65px 1fr 65px"><label for="boltDiameter">Diameter</label><input id="boltDiameter" type="range" min="10" max="100" step="1" value="25"><output id="boltDiameterVal">25 mm</output></div>
+      <div class="buttons"><button id="reverseBolt">Snu retning</button><button id="deleteBolt" disabled style="color:#a41b24">Slett valt bolt</button></div>
+    </fieldset>
+    <p class="small">Sliderane gjeld valt bolt eller neste nye bolt. Bolten har fysisk diameter og ein eigen markør ved innfestinga. Boltar inne i berget kan vere skjulte av mesh.</p>
+    <p id="boltInfo" class="small"></p>
+  </details>
   <div id="status" class="small">Lastar ArcGIS JavaScript SDK …</div>
   <div id="error" class="small"></div>
   <div id="more">Boltar og plan blir haldne separat for kvar scene medan sida er open. Last ned JSON for kvar scene før du lukkar eller lastar sida på nytt. Denne testen endrar ikkje Web Scene eller Enterprise-data.</div>
@@ -87,30 +95,22 @@ const PORTAL_URL = 'https://kart-vegvesen.maps.arcgis.com';
 const CLIENT_ID = '6jgJ7gpJHyIv5miA';
 const $ = (id) => document.getElementById(id);
 let mode = 'navigate', placed = [], visuals = [], view, annotations, currentSceneId = null, sceneBusy = false;
-let planeStart=null, planeMarker=null, refreshPlanes=()=>{};
+let planeStart=null, planeMarker=null, refreshPlanes=()=>{}, refreshBolts=()=>{}, boltMarkers;
 const sceneDrafts = new Map();
 window.addEventListener('beforeunload',evt=>{
   if(placed.length || [...sceneDrafts.values()].some(draft=>draft.length)){evt.preventDefault();evt.returnValue='';}
 });
-const values=()=>({dx:Number($('dx').value),dy:Number($('dy').value),dz:Number($('dz').value),diameter:Number($('diameter').value)});
 const sphereSymbol=(diameter)=>({type:'point-3d',symbolLayers:[{type:'object',resource:{primitive:'sphere'},width:diameter,height:diameter,depth:diameter,material:{color:'#e00000'}}]});
-function updateVisuals(){
-  const {dx,dy,dz,diameter}=values();
-  for(const id of ['dx','dy','dz','diameter']) $(id+'Val').textContent=$(id).value+' m';
-  visuals.forEach((visual,i)=>{const base=placed[i]?.geometry;if(!base || placed[i].attributes.category!=='bolt')return;const point=base.clone();point.x=base.x+dx;point.y=base.y+dy;point.z=base.z+dz;visual.geometry=point;visual.symbol=sphereSymbol(diameter);});
-}
 
 const status = (txt) => $('status').textContent = txt;
 const error = (e) => { console.error(e); $('error').textContent = 'Feil: ' + (e?.message || String(e)); };
-const enable = () => { $('planeTransform').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value); $('plane').disabled = !view || sceneBusy; $('flipDip').disabled = !view || sceneBusy; $('bolt').disabled = !view || sceneBusy; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = (!placed.length && !planeStart) || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
+const enable = () => { $('boltSettings').disabled = !view || sceneBusy; $('deleteBolt').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='bolt' && g.attributes.id===$('boltSelect').value); $('planeTransform').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value); $('plane').disabled = !view || sceneBusy; $('flipDip').disabled = !view || sceneBusy; $('bolt').disabled = !view || sceneBusy; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = (!placed.length && !planeStart) || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
 const changeMode = (m) => { planeStart=null;if(planeMarker)annotations?.remove(planeMarker);planeMarker=null; mode = m; for(const id of ['bolt','plane','navigate'])$(id).classList.toggle('active',m===id); if(view) view.container.style.cursor = m!=='navigate' ? 'crosshair':'default'; enable(); status(m==='plane' ? 'Klikk første punkt langs strøket. Esc avbryt.' : m==='bolt' ? 'Klikk på bergflata for å plassere ein bolt.' : 'Naviger i modellen. Vel bolt eller plan for annotering.'); };
 $('plane').onclick = () => changeMode('plane');
 window.addEventListener('keydown',evt=>{if(evt.key==='Escape')changeMode('navigate');});
 $('bolt').onclick = () => changeMode('bolt');
 $('navigate').onclick = () => changeMode('navigate');
-$('undo').onclick = () => { if(planeStart){changeMode('plane');return;} placed.pop();const visual=visuals.pop();if(visual) annotations.remove(visual);refreshPlanes();enable();status(`${placed.length} annotasjon(ar) står att.`); };
-for(const id of ['dx','dy','dz','diameter']) $(id).addEventListener('input',updateVisuals);
-$('resetOffsets').onclick=()=>{for(const id of ['dx','dy','dz']) $(id).value=0;updateVisuals();};
+$('undo').onclick = () => { if(planeStart){changeMode('plane');return;} placed.pop();const visual=visuals.pop();if(visual) annotations.remove(visual);refreshPlanes();refreshBolts();enable();status(`${placed.length} annotasjon(ar) står att.`); };
 $('zoomBolts').onclick = async () => { if(!view || !placed.length)return; try { await view.goTo({target:visuals.map(g=>g.geometry),scale:600}, {duration:900}); } catch(e) {error(e);} };
 $('save').onclick = () => {
   const result = {format:'Bergmerke3D',version:2,websceneId:currentSceneId,portal:PORTAL_URL,exportedAt:new Date().toISOString(),graphics:placed.map(g=>g.toJSON())};
@@ -118,8 +118,72 @@ $('save').onclick = () => {
   const a=document.createElement('a'); a.href=url;a.download='bergmerke-3d-annotasjonar.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);
 };
 require([
-  'esri/WebScene', 'esri/views/SceneView', 'esri/layers/GraphicsLayer', 'esri/Graphic', 'esri/portal/Portal', 'esri/portal/PortalItem', 'esri/identity/IdentityManager', 'esri/identity/OAuthInfo', 'esri/geometry/Mesh'
-], function(WebScene,SceneView,GraphicsLayer,Graphic,Portal,PortalItem,esriId,OAuthInfo,Mesh) {
+  'esri/WebScene', 'esri/views/SceneView', 'esri/layers/GraphicsLayer', 'esri/Graphic', 'esri/portal/Portal', 'esri/portal/PortalItem', 'esri/identity/IdentityManager', 'esri/identity/OAuthInfo', 'esri/geometry/Mesh', 'esri/geometry/Polyline', 'esri/geometry/Point'
+], function(WebScene,SceneView,GraphicsLayer,Graphic,Portal,PortalItem,esriId,OAuthInfo,Mesh,Polyline,Point) {
+  const boltFields={boltAzimuth:'azimuth_deg',boltInclination:'inclination_deg',boltLength:'length_m',boltDiameter:'diameter_mm'};
+  const selectedBolt=()=>placed.find(g=>g.attributes.category==='bolt' && g.attributes.id===$('boltSelect').value);
+  function boltVector(a){
+    const az=a.azimuth_deg*Math.PI/180,inc=a.inclination_deg*Math.PI/180;
+    return [a.length_m*Math.cos(inc)*Math.sin(az),a.length_m*Math.cos(inc)*Math.cos(az),a.length_m*Math.sin(inc)];
+  }
+  function boltGeometry(a,sr){
+    const wkid=sr.latestWkid||sr.wkid;
+    if(!sr.isWebMercator && !sr.isWGS84 && !((wkid>=32601&&wkid<=32660)||(wkid>=32701&&wkid<=32760)||(wkid>=25828&&wkid<=25838)))throw new Error('Boltverktøyet støttar Web Mercator, WGS84 og UTM i meter.');
+    return new Polyline({spatialReference:sr,hasZ:true,paths:[[a.anchor.slice(),translatedOrigin(a.anchor,boltVector(a),sr)]]});
+  }
+  const boltSymbol=a=>({type:'line-3d',symbolLayers:[{type:'path',profile:'circle',width:a.diameter_mm/1000,cap:'butt',material:{color:'#e00000'}}]});
+  function readBolt(){
+    const g=selectedBolt();
+    for(const [id,field] of Object.entries(boltFields)){
+      if(g)$(id).value=g.attributes[field];
+      $(id+'Val').textContent=$(id).value+(id==='boltLength'?' m':id==='boltDiameter'?' mm':'°');
+    }
+    $('boltInfo').textContent=g ? `Innfesting: X ${g.attributes.anchor[0].toFixed(2)}, Y ${g.attributes.anchor[1].toFixed(2)}, Z ${g.attributes.anchor[2].toFixed(2)}. Snu retning vender heile bolten 180° rundt innfestinga.` : 'Vel verdiar for neste bolt, eller vel ein eksisterande bolt i lista.';
+    enable();
+  }
+  function updateBoltMarkers(){
+    if(!boltMarkers)return;
+    boltMarkers.removeAll();
+    for(const g of placed.filter(g=>g.attributes.category==='bolt')){
+      const a=g.attributes;
+      boltMarkers.add(new Graphic({geometry:new Point({x:a.anchor[0],y:a.anchor[1],z:a.anchor[2],spatialReference:g.geometry.spatialReference}),symbol:{type:'point-3d',symbolLayers:[{type:'icon',resource:{primitive:'circle'},size:9,material:{color:a.id===$('boltSelect').value?'#ffcc00':'#e00000'},outline:{color:'white',size:1}}]}}));
+    }
+  }
+  refreshBolts=()=>{
+    const selected=$('boltSelect').value;
+    $('boltSelect').replaceChildren(new Option('Ny bolt (standardverdiar)',''));
+    placed.filter(g=>g.attributes.category==='bolt').forEach((g,i)=>$('boltSelect').add(new Option(`Bolt ${i+1}`,g.attributes.id)));
+    if([...$('boltSelect').options].some(o=>o.value===selected))$('boltSelect').value=selected;
+    readBolt();updateBoltMarkers();
+  };
+  $('boltSelect').onchange=()=>{readBolt();updateBoltMarkers();};
+  function editBolt(){
+    if(sceneBusy)return;
+    const g=selectedBolt();
+    try{
+      if(g){
+        const a={...g.attributes};for(const [id,field] of Object.entries(boltFields))a[field]=Number($(id).value);
+        const geometry=boltGeometry(a,g.geometry.spatialReference);
+        g.attributes=a;g.geometry=geometry;g.symbol=boltSymbol(a);
+        const visual=visuals[placed.indexOf(g)];visual.geometry=geometry.clone();visual.symbol=g.symbol.clone();
+      }
+      readBolt();
+    }catch(e){error(e);}
+  }
+  for(const id of Object.keys(boltFields))$(id).oninput=editBolt;
+  $('reverseBolt').onclick=()=>{$('boltAzimuth').value=(Number($('boltAzimuth').value)+180)%360;$('boltInclination').value=-Number($('boltInclination').value);editBolt();};
+  $('deleteBolt').onclick=()=>{
+    const g=selectedBolt();if(!g||sceneBusy)return;
+    const i=placed.indexOf(g);annotations.remove(visuals[i]);placed.splice(i,1);visuals.splice(i,1);refreshBolts();status('Valt bolt er sletta.');
+  };
+  function addBolt(p){
+    const a={category:'bolt',id:crypto.randomUUID(),createdAt:new Date().toISOString(),anchor:[p.x,p.y,p.z]};
+    for(const [id,field] of Object.entries(boltFields))a[field]=Number($(id).value);
+    const g=new Graphic({geometry:boltGeometry(a,p.spatialReference),symbol:boltSymbol(a),attributes:a});
+    placed.push(g);const visual=g.clone();visuals.push(visual);annotations.add(visual);
+    changeMode('navigate');refreshBolts();$('boltSelect').value=a.id;readBolt();updateBoltMarkers();
+    status('Bolt plassert. Juster retning, helling, lengde og diameter. Gul markør viser innfestinga til valt bolt.');
+  }
   let fallSide=1;
   const selectedPlane=()=>placed.find(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value);
   function planeGeometry(a,sr){
@@ -292,10 +356,12 @@ require([
       visuals=placed.map(g=>g.clone());
       annotations = new GraphicsLayer({title:'Bergmerke – mellombelse boltar',elevationInfo:{mode:'absolute-height'},graphics:visuals});
       scene.add(annotations);
+      boltMarkers = new GraphicsLayer({title:'Boltinnfestingar',elevationInfo:{mode:'absolute-height'}});
+      scene.add(boltMarkers);
       view = new SceneView({container:'viewDiv',map:scene,popupEnabled:false,qualityProfile:'high'});
       await view.when();
-      updateVisuals();changeMode('navigate');refreshPlanes();
-      $('currentScene').textContent=`Open scene: ${scene.portalItem.title}. ${placed.length} mellombelse boltar.`;
+      changeMode('navigate');refreshPlanes();refreshBolts();
+      $('currentScene').textContent=`Open scene: ${scene.portalItem.title}.`;
       const meshLayers = scene.allLayers.filter(layer => layer.type === 'integrated-mesh' || layer.type === 'integrated-mesh-3dtiles');
       status(`Web Scene opna. ${meshLayers.length} Integrated Mesh-lag funne. Vel «Plasser bolt».`);
       view.on('click', (evt) => {
@@ -306,13 +372,7 @@ require([
           const p = view.toMap({x:evt.x,y:evt.y});
           if(!p || !Number.isFinite(p.z)) {status('Ingen 3D-treff. Prøv å klikke direkte på modellen.');return;}
           if(mode==='plane'){addPlane(p);return;}
-          const g = new Graphic({
-            geometry:p.clone(),
-            symbol:sphereSymbol(values().diameter),
-            attributes:{category:'bolt',index:placed.length+1,createdAt:new Date().toISOString()}
-          });
-          placed.push(g);const visual=g.clone();visuals.push(visual);annotations.add(visual);updateVisuals();enable();
-          status(`Bolt ${placed.length} plassert. X: ${p.x.toFixed(2)}, Y: ${p.y.toFixed(2)}, Z: ${p.z.toFixed(2)} (SR: ${p.spatialReference?.wkid ?? 'ukjent'}). Visingsforskyving: X=${values().dx}, Y=${values().dy}, Z=${values().dz} m. Juster X/Y/Z om kula er skjult av bergflata.`);
+          addBolt(p);
         } catch(e) {error(e);}
       });
     } catch(e) {
