@@ -40,6 +40,13 @@ h1{font-size:18px;margin:0 0 6px}p{font-size:13px;margin:5px 0 12px;line-height:
     <p id="sceneCount" class="small" aria-live="polite"></p>
     <p id="currentScene" class="small">Ingen scene er opna.</p>
   </section>
+  <details open>
+    <summary>Vising inne i berget</summary>
+    <p class="small">ArcGIS støttar ikkje gradvis gjennomsiktigheit for Integrated Mesh. Skjul meshen for å sjå boltar og plan bak bergflata.</p>
+    <label><input id="hideMesh" type="checkbox" disabled> Skjul mesh</label>
+    <div class="slider-row" style="grid-template-columns:75px 1fr 55px"><label for="groundTransparency">Terreng</label><input id="groundTransparency" type="range" min="0" max="100" step="5" value="0" disabled><output id="groundTransparencyVal">0 %</output></div>
+    <p id="meshVisibilityInfo" class="small">Opne ei scene først. Terrengslideren viser prosent gjennomsiktigheit for bakken under mesh.</p>
+  </details>
   <div class="buttons">
     <button id="login">Logg inn med SSO</button>
     <button id="bolt" disabled>● Plasser bolt</button>
@@ -104,7 +111,7 @@ const sphereSymbol=(diameter)=>({type:'point-3d',symbolLayers:[{type:'object',re
 
 const status = (txt) => $('status').textContent = txt;
 const error = (e) => { console.error(e); $('error').textContent = 'Feil: ' + (e?.message || String(e)); };
-const enable = () => { $('boltSettings').disabled = !view || sceneBusy; $('deleteBolt').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='bolt' && g.attributes.id===$('boltSelect').value); $('planeTransform').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value); $('plane').disabled = !view || sceneBusy; $('flipDip').disabled = !view || sceneBusy; $('bolt').disabled = !view || sceneBusy; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = (!placed.length && !planeStart) || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
+const enable = () => { $('boltSettings').disabled = !view || sceneBusy; $('deleteBolt').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='bolt' && g.attributes.id===$('boltSelect').value); $('planeTransform').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value); $('plane').disabled = !view || sceneBusy || $('hideMesh').checked; $('flipDip').disabled = !view || sceneBusy; $('bolt').disabled = !view || sceneBusy || $('hideMesh').checked; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = (!placed.length && !planeStart) || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
 const changeMode = (m) => { planeStart=null;if(planeMarker)annotations?.remove(planeMarker);planeMarker=null; mode = m; for(const id of ['bolt','plane','navigate'])$(id).classList.toggle('active',m===id); if(view) view.container.style.cursor = m!=='navigate' ? 'crosshair':'default'; enable(); status(m==='plane' ? 'Klikk første punkt langs strøket. Esc avbryt.' : m==='bolt' ? 'Klikk på bergflata for å plassere ein bolt.' : 'Naviger i modellen. Vel bolt eller plan for annotering.'); };
 $('plane').onclick = () => changeMode('plane');
 window.addEventListener('keydown',evt=>{if(evt.key==='Escape')changeMode('navigate');});
@@ -120,6 +127,24 @@ $('save').onclick = () => {
 require([
   'esri/WebScene', 'esri/views/SceneView', 'esri/layers/GraphicsLayer', 'esri/Graphic', 'esri/portal/Portal', 'esri/portal/PortalItem', 'esri/identity/IdentityManager', 'esri/identity/OAuthInfo', 'esri/geometry/Mesh', 'esri/geometry/Polyline', 'esri/geometry/Point'
 ], function(WebScene,SceneView,GraphicsLayer,Graphic,Portal,PortalItem,esriId,OAuthInfo,Mesh,Polyline,Point) {
+  let inspectionMeshes=[], inspectionGround=null, originalGroundOpacity=1, originalNavigationConstraint=null;
+  function updateInspection(){
+    const hidden=$('hideMesh').checked;
+    inspectionMeshes.forEach(({layer,visible})=>{layer.visible=hidden?false:visible;});
+    if(inspectionGround){
+      inspectionGround.opacity=originalGroundOpacity*(1-Number($('groundTransparency').value)/100);
+      inspectionGround.navigationConstraint=hidden?{type:'none'}:originalNavigationConstraint;
+    }
+    $('groundTransparencyVal').textContent=$('groundTransparency').value+' %';
+    $('meshVisibilityInfo').textContent=inspectionMeshes.length ? (hidden?'Mesh er skjult. Boltar og plan er synlege dersom terrenget ikkje dekkjer dei. Slå på mesh før du plasserer nye annotasjonar.':'Mesh er vist med scena sine opphavlege synlegheitsval. Terrengslideren påverkar berre bakken under mesh.') : 'Ingen Integrated Mesh-lag funne. Slideren påverkar terrenget.';
+    enable();
+  }
+  $('hideMesh').onchange=()=>{
+    if($('hideMesh').checked){changeMode('navigate');$('groundTransparency').value=100;}
+    else $('groundTransparency').value=0;
+    updateInspection();
+  };
+  $('groundTransparency').oninput=updateInspection;
   const boltFields={boltAzimuth:'azimuth_deg',boltInclination:'inclination_deg',boltLength:'length_m',boltDiameter:'diameter_mm'};
   const selectedBolt=()=>placed.find(g=>g.attributes.category==='bolt' && g.attributes.id===$('boltSelect').value);
   function boltVector(a){
@@ -349,6 +374,7 @@ require([
       $('error').textContent='';
       status('Hentar sikra Web Scene …');
       await scene.load();
+      $('hideMesh').disabled=true;$('groundTransparency').disabled=true;
       if(currentSceneId)sceneDrafts.set(currentSceneId,placed);
       if(view){view.destroy();view=null;}
       currentSceneId=id;
@@ -363,9 +389,16 @@ require([
       changeMode('navigate');refreshPlanes();refreshBolts();
       $('currentScene').textContent=`Open scene: ${scene.portalItem.title}.`;
       const meshLayers = scene.allLayers.filter(layer => layer.type === 'integrated-mesh' || layer.type === 'integrated-mesh-3dtiles');
+      inspectionMeshes=meshLayers.toArray().map(layer=>({layer,visible:layer.visible}));
+      inspectionGround=scene.ground;
+      originalGroundOpacity=scene.ground.opacity;
+      originalNavigationConstraint=scene.ground.navigationConstraint;
+      $('hideMesh').checked=false;$('groundTransparency').value=0;
+      $('hideMesh').disabled=!inspectionMeshes.length;$('groundTransparency').disabled=false;
+      updateInspection();
       status(`Web Scene opna. ${meshLayers.length} Integrated Mesh-lag funne. Vel «Plasser bolt».`);
       view.on('click', (evt) => {
-        if(sceneBusy || mode === 'navigate') return;
+        if(sceneBusy || mode === 'navigate' || $('hideMesh').checked) return;
         evt.stopPropagation();
         try {
           // toMap brukar den synlege mesh-overflata og deretter bakken når ingen mesh blir treft.
