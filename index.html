@@ -43,11 +43,22 @@ h1{font-size:18px;margin:0 0 6px}p{font-size:13px;margin:5px 0 12px;line-height:
   <div class="buttons">
     <button id="login">Logg inn med SSO</button>
     <button id="bolt" disabled>● Plasser bolt</button>
+    <button id="plane" disabled>▱ Teikn plan</button>
     <button id="navigate" class="active" disabled>Hand / naviger</button>
     <button id="undo" disabled>Angre siste</button>
     <button id="save" disabled>Lagre JSON</button>
-    <button id="zoomBolts" disabled>Zoom til boltar</button>
+    <button id="zoomBolts" disabled>Zoom til annotasjonar</button>
   </div>
+  <details open>
+    <summary style="margin-top:12px">Sprekkeplan · strøk og fall</summary>
+    <p class="small">Klikk to punkt langs strøket. Planet brukar midlere høgde og ei vassrett strøklinje. Fall blir målt frå vassrett (0°) til loddrett (90°).</p>
+    <label for="planeSelect">Plan som skal justerast</label>
+    <select id="planeSelect" style="width:100%"><option value="">Ingen plan</option></select>
+    <div class="slider-row" style="grid-template-columns:55px 1fr 70px"><label for="dip">Fall</label><input id="dip" type="range" min="0" max="90" step="1" value="45"><output id="dipVal">45°</output></div>
+    <div class="slider-row" style="grid-template-columns:55px 1fr 70px"><label for="planeWidth">Breidd</label><input id="planeWidth" type="range" min="1" max="50" step="0.5" value="10"><output id="planeWidthVal">10 m</output></div>
+    <button id="flipDip" disabled>Snu fallretning</button>
+    <p id="planeInfo" class="small">Breidd er målt langs planet, sentrert om strøklinja. Sliderane justerer valt plan, eller neste nye plan.</p>
+  </details>
   <p style="margin:12px 0 4px"><strong>Forskyv kuler i 3D</strong> (berre vising)</p>
   <div class="slider-row"><label for="dx">X</label><input id="dx" type="range" min="-30" max="30" step="0.5" value="0"><output id="dxVal">0 m</output></div>
   <div class="slider-row"><label for="dy">Y</label><input id="dy" type="range" min="-30" max="30" step="0.5" value="0"><output id="dyVal">0 m</output></div>
@@ -57,7 +68,7 @@ h1{font-size:18px;margin:0 0 6px}p{font-size:13px;margin:5px 0 12px;line-height:
   <p class="small">X/Y er forskyving i kartkoordinatane (Web Mercator), Z er høgde. Ein kule har fysisk diameter i meter, ikkje skjermpikslar.</p>
   <div id="status" class="small">Lastar ArcGIS JavaScript SDK …</div>
   <div id="error" class="small"></div>
-  <div id="more">Boltar blir haldne separat for kvar scene medan sida er open. Last ned JSON for kvar scene før du lukkar eller lastar sida på nytt. Denne testen endrar ikkje Web Scene eller Enterprise-data.</div>
+  <div id="more">Boltar og plan blir haldne separat for kvar scene medan sida er open. Last ned JSON for kvar scene før du lukkar eller lastar sida på nytt. Denne testen endrar ikkje Web Scene eller Enterprise-data.</div>
 </aside>
 <script>
 (() => {
@@ -67,6 +78,7 @@ const PORTAL_URL = 'https://kart-vegvesen.maps.arcgis.com';
 const CLIENT_ID = '6jgJ7gpJHyIv5miA';
 const $ = (id) => document.getElementById(id);
 let mode = 'navigate', placed = [], visuals = [], view, annotations, currentSceneId = null, sceneBusy = false;
+let planeStart=null, planeMarker=null, refreshPlanes=()=>{};
 const sceneDrafts = new Map();
 window.addEventListener('beforeunload',evt=>{
   if(placed.length || [...sceneDrafts.values()].some(draft=>draft.length)){evt.preventDefault();evt.returnValue='';}
@@ -76,27 +88,85 @@ const sphereSymbol=(diameter)=>({type:'point-3d',symbolLayers:[{type:'object',re
 function updateVisuals(){
   const {dx,dy,dz,diameter}=values();
   for(const id of ['dx','dy','dz','diameter']) $(id+'Val').textContent=$(id).value+' m';
-  visuals.forEach((visual,i)=>{const base=placed[i]?.geometry;if(!base)return;const point=base.clone();point.x=base.x+dx;point.y=base.y+dy;point.z=base.z+dz;visual.geometry=point;visual.symbol=sphereSymbol(diameter);});
+  visuals.forEach((visual,i)=>{const base=placed[i]?.geometry;if(!base || placed[i].attributes.category!=='bolt')return;const point=base.clone();point.x=base.x+dx;point.y=base.y+dy;point.z=base.z+dz;visual.geometry=point;visual.symbol=sphereSymbol(diameter);});
 }
 
 const status = (txt) => $('status').textContent = txt;
 const error = (e) => { console.error(e); $('error').textContent = 'Feil: ' + (e?.message || String(e)); };
-const enable = () => { $('bolt').disabled = !view || sceneBusy; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = !placed.length || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
-const changeMode = (m) => { mode = m; $('bolt').classList.toggle('active',m==='bolt'); $('navigate').classList.toggle('active',m==='navigate'); if(view) view.container.style.cursor = m==='bolt' ? 'crosshair':'default'; status(m==='bolt' ? 'Klikk på bergflata for å plassere ein bolt.' : 'Naviger i modellen. Vel «Plasser bolt» for annotering.'); };
+const enable = () => { $('plane').disabled = !view || sceneBusy; $('flipDip').disabled = !view || sceneBusy; $('bolt').disabled = !view || sceneBusy; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = (!placed.length && !planeStart) || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
+const changeMode = (m) => { planeStart=null;if(planeMarker)annotations?.remove(planeMarker);planeMarker=null; mode = m; for(const id of ['bolt','plane','navigate'])$(id).classList.toggle('active',m===id); if(view) view.container.style.cursor = m!=='navigate' ? 'crosshair':'default'; enable(); status(m==='plane' ? 'Klikk første punkt langs strøket. Esc avbryt.' : m==='bolt' ? 'Klikk på bergflata for å plassere ein bolt.' : 'Naviger i modellen. Vel bolt eller plan for annotering.'); };
+$('plane').onclick = () => changeMode('plane');
+window.addEventListener('keydown',evt=>{if(evt.key==='Escape')changeMode('navigate');});
 $('bolt').onclick = () => changeMode('bolt');
 $('navigate').onclick = () => changeMode('navigate');
-$('undo').onclick = () => { placed.pop();const visual=visuals.pop();if(visual) annotations.remove(visual);enable();status(`${placed.length} bolt(ar) står att.`); };
+$('undo').onclick = () => { if(planeStart){changeMode('plane');return;} placed.pop();const visual=visuals.pop();if(visual) annotations.remove(visual);refreshPlanes();enable();status(`${placed.length} annotasjon(ar) står att.`); };
 for(const id of ['dx','dy','dz','diameter']) $(id).addEventListener('input',updateVisuals);
 $('resetOffsets').onclick=()=>{for(const id of ['dx','dy','dz']) $(id).value=0;updateVisuals();};
 $('zoomBolts').onclick = async () => { if(!view || !placed.length)return; try { await view.goTo({target:visuals.map(g=>g.geometry),scale:600}, {duration:900}); } catch(e) {error(e);} };
 $('save').onclick = () => {
-  const result = {format:'Bergmerke3D',version:1,websceneId:currentSceneId,portal:PORTAL_URL,exportedAt:new Date().toISOString(),graphics:placed.map(g=>g.toJSON())};
+  const result = {format:'Bergmerke3D',version:2,websceneId:currentSceneId,portal:PORTAL_URL,exportedAt:new Date().toISOString(),graphics:placed.map(g=>g.toJSON())};
   const url = URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));
-  const a=document.createElement('a'); a.href=url;a.download='bergmerke-3d-boltar.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);
+  const a=document.createElement('a'); a.href=url;a.download='bergmerke-3d-annotasjonar.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),30000);
 };
 require([
-  'esri/WebScene', 'esri/views/SceneView', 'esri/layers/GraphicsLayer', 'esri/Graphic', 'esri/portal/Portal', 'esri/portal/PortalItem', 'esri/identity/IdentityManager', 'esri/identity/OAuthInfo'
-], function(WebScene,SceneView,GraphicsLayer,Graphic,Portal,PortalItem,esriId,OAuthInfo) {
+  'esri/WebScene', 'esri/views/SceneView', 'esri/layers/GraphicsLayer', 'esri/Graphic', 'esri/portal/Portal', 'esri/portal/PortalItem', 'esri/identity/IdentityManager', 'esri/identity/OAuthInfo', 'esri/geometry/Mesh'
+], function(WebScene,SceneView,GraphicsLayer,Graphic,Portal,PortalItem,esriId,OAuthInfo,Mesh) {
+  let fallSide=1;
+  const selectedPlane=()=>placed.find(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value);
+  function planeGeometry(a,sr){
+    const angle=a.dip*Math.PI/180, half=a.width/2;
+    const ux=Math.sin(a.strike*Math.PI/180),uy=Math.cos(a.strike*Math.PI/180);
+    const vx=uy*a.side*Math.cos(angle),vy=-ux*a.side*Math.cos(angle),vz=-Math.sin(angle);
+    const position=[];
+    for(const [s,t] of [[-1,-1],[1,-1],[1,1],[-1,1]])position.push(s*a.length/2*ux+t*half*vx,s*a.length/2*uy+t*half*vy,t*half*vz);
+    return new Mesh({spatialReference:sr,vertexSpace:{type:a.localSpace?'local':'georeferenced',origin:a.origin},vertexAttributes:{position},components:[{faces:[0,1,2,0,2,3],shading:'flat',material:{doubleSided:true}}]});
+  }
+  function readPlane(){
+    const g=selectedPlane();
+    if(g){$('dip').value=g.attributes.dip;$('planeWidth').value=g.attributes.width;fallSide=g.attributes.side;}
+    $('dipVal').textContent=$('dip').value+'°';$('planeWidthVal').textContent=$('planeWidth').value+' m';
+    if(g){const a=g.attributes;const bearing=(a.strike+90*a.side+360)%360;$('planeInfo').textContent=`Strøk: ${a.strike.toFixed(1)}° / ${((a.strike+180)%360).toFixed(1)}°. Fall: ${a.dip}° mot ${bearing.toFixed(1)}°. Lengd langs strøk: ${a.length.toFixed(2)} m. ${a.localSpace?'Retningar relativt til nord.':'Retningar relativt til rutenett-nord.'}`;}
+    else $('planeInfo').textContent='Sliderane gjeld neste nye plan. Breidd er målt langs planet, sentrert om strøklinja.';
+  }
+  refreshPlanes=()=>{
+    const selected=$('planeSelect').value;
+    $('planeSelect').replaceChildren(new Option('Nytt plan (standardverdiar)',''));
+    placed.filter(g=>g.attributes.category==='plane').forEach((g,i)=>$('planeSelect').add(new Option(`Plan ${i+1}`,g.attributes.id)));
+    if([...$('planeSelect').options].some(o=>o.value===selected))$('planeSelect').value=selected;
+    readPlane();
+  };
+  $('planeSelect').onchange=readPlane;
+  function editPlane(){
+    const g=selectedPlane();
+    if(g && !sceneBusy){const a={...g.attributes,dip:Number($('dip').value),width:Number($('planeWidth').value),side:fallSide};g.geometry=planeGeometry(a,g.geometry.spatialReference);g.attributes=a;visuals[placed.indexOf(g)].geometry=g.geometry.clone();}
+    readPlane();
+  }
+  for(const id of ['dip','planeWidth'])$(id).oninput=editPlane;
+  $('flipDip').onclick=()=>{fallSide*=-1;editPlane();};
+  function addPlane(p){
+    if(!planeStart){planeStart=p.clone();planeMarker=new Graphic({geometry:p.clone(),symbol:sphereSymbol(0.4)});annotations.add(planeMarker);enable();status('Klikk andre punkt langs strøket. Esc avbryt.');return;}
+    const first=planeStart,sr=p.spatialReference;
+    const localSpace=sr.isWebMercator || sr.isWGS84;
+    let east,north;
+    const origin=[(first.x+p.x)/2,(first.y+p.y)/2,(first.z+p.z)/2];
+    if(localSpace){
+      const lat=sr.isWebMercator ? (2*Math.atan(Math.exp(origin[1]/6378137))-Math.PI/2) : origin[1]*Math.PI/180;
+      const factor=sr.isWebMercator ? Math.cos(lat) : Math.PI/180*6378137;
+      east=(p.x-first.x)*factor*(sr.isWebMercator?1:Math.cos(lat));north=(p.y-first.y)*factor;
+    }else{
+      // UTM and ETRS89 UTM use metres. Reject unknown units instead of guessing.
+      const wkid=sr.latestWkid||sr.wkid;
+      if(!((wkid>=32601&&wkid<=32760)||(wkid>=25828&&wkid<=25838)))throw new Error('Planverktøyet støttar Web Mercator, WGS84 og UTM i meter.');
+      east=p.x-first.x;north=p.y-first.y;
+    }
+    const length=Math.hypot(east,north);
+    if(length<0.1){status('Punkta er for nær kvarandre. Vel andre punkt minst 10 cm unna.');return;}
+    const a={category:'plane',id:crypto.randomUUID(),createdAt:new Date().toISOString(),origin,localSpace,length,strike:(Math.atan2(east,north)*180/Math.PI+360)%360,dip:Number($('dip').value),width:Number($('planeWidth').value),side:fallSide};
+    const g=new Graphic({geometry:planeGeometry(a,sr),attributes:a,symbol:{type:'mesh-3d',symbolLayers:[{type:'fill',material:{color:[0,170,220,0.5]},edges:{type:'solid',color:'#00566e',size:1.5}}]}});
+    placed.push(g);const visual=g.clone();visuals.push(visual);annotations.add(visual);
+    changeMode('navigate');refreshPlanes();$('planeSelect').value=a.id;readPlane();enable();
+    const dz=Math.abs(first.z-p.z);status(`Plan oppretta. Juster fall og breidd i panelet.${dz>0.5?` Strøk er vassrett; høgdeskilnaden på ${dz.toFixed(2)} m mellom klikka er jamna ut.`:''}`);
+  }
   esriId.registerOAuthInfos([new OAuthInfo({appId:CLIENT_ID,portalUrl:PORTAL_URL,flowType:'auto',popup:false})]);
   const sharingUrl = PORTAL_URL + "/sharing";
   $('login').onclick = () => {
@@ -172,17 +242,18 @@ require([
       scene.add(annotations);
       view = new SceneView({container:'viewDiv',map:scene,popupEnabled:false,qualityProfile:'high'});
       await view.when();
-      updateVisuals();changeMode('navigate');
+      updateVisuals();changeMode('navigate');refreshPlanes();
       $('currentScene').textContent=`Open scene: ${scene.portalItem.title}. ${placed.length} mellombelse boltar.`;
       const meshLayers = scene.allLayers.filter(layer => layer.type === 'integrated-mesh' || layer.type === 'integrated-mesh-3dtiles');
       status(`Web Scene opna. ${meshLayers.length} Integrated Mesh-lag funne. Vel «Plasser bolt».`);
       view.on('click', (evt) => {
-        if(mode !== 'bolt') return;
+        if(sceneBusy || mode === 'navigate') return;
         evt.stopPropagation();
         try {
           // toMap brukar den synlege mesh-overflata og deretter bakken når ingen mesh blir treft.
           const p = view.toMap({x:evt.x,y:evt.y});
           if(!p || !Number.isFinite(p.z)) {status('Ingen 3D-treff. Prøv å klikke direkte på modellen.');return;}
+          if(mode==='plane'){addPlane(p);return;}
           const g = new Graphic({
             geometry:p.clone(),
             symbol:sphereSymbol(values().diameter),
