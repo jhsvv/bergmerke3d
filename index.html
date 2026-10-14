@@ -76,6 +76,8 @@ h1{font-size:18px;margin:0 0 6px}p{font-size:13px;margin:5px 0 12px;line-height:
     <select id="planeSelect" style="width:100%"><option value="">Ingen plan</option></select>
     <div class="slider-row" style="grid-template-columns:55px 1fr 70px"><label for="dip">Fall</label><input id="dip" type="range" min="0" max="90" step="1" value="45"><output id="dipVal">45°</output></div>
     <div class="slider-row" style="grid-template-columns:55px 1fr 70px"><label for="planeWidth">Breidd</label><input id="planeWidth" type="range" min="1" max="50" step="0.5" value="10"><output id="planeWidthVal">10 m</output></div>
+    <div class="slider-row" style="grid-template-columns:55px 1fr 70px"><label for="planeLength">Lengde</label><input id="planeLength" type="range" min="0.1" max="100" step="0.1" value="10"><output id="planeLengthVal">10 m</output></div>
+    <p class="small"><span id="planeColor" style="display:inline-block;width:12px;height:12px;border-radius:3px;border:1px solid #52665e;vertical-align:middle"></span> Lengde blir først bestemt av dei to klikka. Slideren justerer valt plan langs strøket, rundt midtpunktet.</p>
     <button id="flipDip" disabled>Snu fallretning</button>
     <fieldset id="planeTransform" disabled style="margin-top:10px;border:1px solid #ccd8d2;border-radius:6px">
       <legend>Flytt og roter valt plan</legend>
@@ -125,7 +127,7 @@ const sphereSymbol=(diameter)=>({type:'point-3d',symbolLayers:[{type:'object',re
 
 const status = (txt) => $('status').textContent = txt;
 const error = (e) => { console.error(e); $('error').textContent = 'Feil: ' + (e?.message || String(e)); };
-const enable = () => { syncSliceControls(); $('boltSettings').disabled = !view || sceneBusy; $('deleteBolt').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='bolt' && g.attributes.id===$('boltSelect').value); $('planeTransform').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value); $('plane').disabled = !view || sceneBusy || $('hideMesh').checked; $('flipDip').disabled = !view || sceneBusy; $('bolt').disabled = !view || sceneBusy || $('hideMesh').checked; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = (!placed.length && !planeStart) || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
+const enable = () => { $('planeLength').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value); syncSliceControls(); $('boltSettings').disabled = !view || sceneBusy; $('deleteBolt').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='bolt' && g.attributes.id===$('boltSelect').value); $('planeTransform').disabled = !view || sceneBusy || !placed.some(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value); $('plane').disabled = !view || sceneBusy || $('hideMesh').checked; $('flipDip').disabled = !view || sceneBusy; $('bolt').disabled = !view || sceneBusy || $('hideMesh').checked; $('navigate').disabled = !view || sceneBusy; $('save').disabled = !placed.length || sceneBusy; $('undo').disabled = (!placed.length && !planeStart) || sceneBusy; $('zoomBolts').disabled = !placed.length || sceneBusy; };
 const changeMode = (m) => { planeStart=null;if(planeMarker)annotations?.remove(planeMarker);planeMarker=null; mode = m; for(const id of ['bolt','plane','slice','navigate'])$(id).classList.toggle('active',m===id); if(view) view.container.style.cursor = m!=='navigate' ? 'crosshair':'default'; enable(); status(m==='slice' ? 'Klikk første punkt langs det loddrette snittet. Esc avbryt.' : m==='plane' ? 'Klikk første punkt langs strøket. Esc avbryt.' : m==='bolt' ? 'Klikk på bergflata for å plassere ein bolt.' : 'Naviger i modellen. Vel bolt eller plan for annotering.'); };
 $('plane').onclick = () => changeMode('plane');
 window.addEventListener('keydown',evt=>{if(evt.key==='Escape')changeMode('navigate');});
@@ -292,6 +294,17 @@ require([
     status('Bolt plassert. Juster retning, helling, lengde og diameter. Gul markør viser innfestinga til valt bolt.');
   }
   let fallSide=1;
+  const planeColorCounters=new Map();
+  function nextPlaneColor(){
+    const index=planeColorCounters.get(currentSceneId)||0;
+    planeColorCounters.set(currentSceneId,index+1);
+    const palette=[[0,170,220],[230,145,30],[155,85,210],[35,170,100],[225,75,130],[100,125,225],[170,150,35],[30,175,170]];
+    if(index<palette.length)return [...palette[index],0.5];
+    const h=((index-palette.length)*137.508+15)%360;
+    const c=0.7,x=c*(1-Math.abs((h/60)%2-1)),m=0.15;
+    const rgb=h<60?[c,x,0]:h<120?[x,c,0]:h<180?[0,c,x]:h<240?[0,x,c]:h<300?[x,0,c]:[c,0,x];
+    return [...rgb.map(v=>Math.round((v+m)*255)),0.5];
+  }
   const selectedPlane=()=>placed.find(g=>g.attributes.category==='plane' && g.attributes.id===$('planeSelect').value);
   function planeGeometry(a,sr){
     const angle=a.dip*Math.PI/180, half=a.width/2;
@@ -303,7 +316,10 @@ require([
   }
   function readPlane(){
     const g=selectedPlane();
-    if(g){$('dip').value=g.attributes.dip;$('planeWidth').value=g.attributes.width;fallSide=g.attributes.side;}
+    if(g){$('dip').value=g.attributes.dip;$('planeWidth').value=g.attributes.width;$('planeLength').max=Math.max(100,Math.ceil(g.attributes.length));$('planeLength').value=g.attributes.length;fallSide=g.attributes.side;}
+    $('planeLength').disabled=!g || sceneBusy;
+    $('planeLengthVal').textContent=g?g.attributes.length.toFixed(1)+' m':'–';
+    $('planeColor').style.backgroundColor=g?`rgb(${(g.attributes.color||[0,170,220]).slice(0,3).join(',')})`:'transparent';
     const offsets=g?.attributes.offsets||[0,0,0];
     ['planeEast','planeNorth','planeUp'].forEach((id,i)=>$(id).value=offsets[i]);
     $('planeStrike').value=g?.attributes.strike||0;
@@ -321,12 +337,12 @@ require([
     readPlane();
   };
   $('planeSelect').onchange=readPlane;
-  function editPlane(){
+  function editPlane(evt){
     const g=selectedPlane();
-    if(g && !sceneBusy){const a={...g.attributes,dip:Number($('dip').value),width:Number($('planeWidth').value),side:fallSide};g.geometry=planeGeometry(a,g.geometry.spatialReference);g.attributes=a;visuals[placed.indexOf(g)].geometry=g.geometry.clone();}
+    if(g && !sceneBusy){const a={...g.attributes,dip:Number($('dip').value),width:Number($('planeWidth').value),length:evt?.target?.id==='planeLength'?Number($('planeLength').value):g.attributes.length,side:fallSide};g.geometry=planeGeometry(a,g.geometry.spatialReference);g.attributes=a;visuals[placed.indexOf(g)].geometry=g.geometry.clone();}
     readPlane();
   }
-  for(const id of ['dip','planeWidth'])$(id).oninput=editPlane;
+  for(const id of ['dip','planeWidth','planeLength'])$(id).oninput=editPlane;
   $('flipDip').onclick=()=>{fallSide*=-1;editPlane();};
   function translatedOrigin(base,offsets,sr){
     const [east,north,up]=offsets;
@@ -384,8 +400,8 @@ require([
     }
     const length=Math.hypot(east,north);
     if(length<0.1){status('Punkta er for nær kvarandre. Vel andre punkt minst 10 cm unna.');return;}
-    const a={category:'plane',id:crypto.randomUUID(),createdAt:new Date().toISOString(),origin,localSpace,length,strike:(Math.atan2(east,north)*180/Math.PI+360)%360,dip:Number($('dip').value),width:Number($('planeWidth').value),side:fallSide};
-    const g=new Graphic({geometry:planeGeometry(a,sr),attributes:a,symbol:{type:'mesh-3d',symbolLayers:[{type:'fill',material:{color:[0,170,220,0.5]},edges:{type:'solid',color:'#00566e',size:1.5}}]}});
+    const a={category:'plane',id:crypto.randomUUID(),createdAt:new Date().toISOString(),origin,localSpace,length,strike:(Math.atan2(east,north)*180/Math.PI+360)%360,dip:Number($('dip').value),width:Number($('planeWidth').value),side:fallSide,color:nextPlaneColor()};
+    const g=new Graphic({geometry:planeGeometry(a,sr),attributes:a,symbol:{type:'mesh-3d',symbolLayers:[{type:'fill',material:{color:a.color},edges:{type:'solid',color:a.color.slice(0,3).map(v=>Math.round(v*0.55)),size:1.5}}]}});
     placed.push(g);const visual=g.clone();visuals.push(visual);annotations.add(visual);
     changeMode('navigate');refreshPlanes();$('planeSelect').value=a.id;readPlane();enable();
     const dz=Math.abs(first.z-p.z);status(`Plan oppretta. Juster fall og breidd i panelet.${dz>0.5?` Strøk er vassrett; høgdeskilnaden på ${dz.toFixed(2)} m mellom klikka er jamna ut.`:''}`);
